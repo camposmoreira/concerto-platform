@@ -1,4 +1,4 @@
-FROM ubuntu:18.04
+FROM ubuntu:18.04 as base
 MAINTAINER Przemyslaw Lis <przemek@concertoplatform.com>
 
 ARG CRAN_MIRROR=https://cloud.r-project.org
@@ -99,13 +99,47 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     r-base-dev \
  && rm -rf /var/lib/apt/lists/* \
  && sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
- && locale-gen "en_US.UTF-8" \
- && Rscript -e "install.packages('https://cran.r-project.org/src/contrib/Archive/rjson/rjson_0.2.20.tar.gz')" \
+ && locale-gen "en_US.UTF-8"
+
+Run Rscript -e "install.packages('https://cran.r-project.org/src/contrib/Archive/rjson/rjson_0.2.20.tar.gz')" \
  && Rscript -e "install.packages(c('digest','filelock','httr','jsonlite','redux','RMySQL','xml2'), repos='$CRAN_MIRROR')" \
  && Rscript -e "install.packages('https://cran.r-project.org/src/contrib/Archive/catR/catR_3.16.tar.gz')" \
  && R CMD INSTALL /app/concerto/src/Concerto/TestBundle/Resources/R/concerto5 \
- && chmod +x /wait-for-it.sh \
- && php /app/concerto/bin/console concerto:r:cache \
+ && chmod +x /wait-for-it.sh
+
+
+# This stage installs bower and runs it to install frontend dependencies
+FROM node:12 AS bower_install
+RUN npm install -g bower
+
+COPY ./src /app/concerto/src
+RUN cd /app/concerto/src/Concerto/PanelBundle/Resources/public/angularjs && bower install --allow-root
+RUN cd /app/concerto/src/Concerto/TestBundle/Resources/public/angularjs && bower install --allow-root
+
+# This stage installs PHP composer dependencies
+# This stage installs PHP composer dependencies
+FROM base AS composer_install
+WORKDIR /app/concerto
+
+# Install Composer on this specific version to not break old php packages
+ARG COMPOSER_VERSION=2.2
+# Enables composer to run install on the Dockerfile (as root) without interaction
+ARG COMPOSER_ALLOW_SUPERUSER=1
+
+RUN curl -sS https://getcomposer.org/installer | php -- \
+   --$COMPOSER_VERSION \
+   --install-dir=/usr/local/bin --filename=composer
+
+COPY . /app/concerto/
+COPY --from=bower_install /app/concerto/src /app/concerto/src
+
+RUN composer install \
+   --no-interaction \
+   --no-plugins \
+   --no-dev \
+   --prefer-dist
+
+RUN php /app/concerto/bin/console concerto:r:cache \
  && crontab -l | { cat; echo "* * * * * . /app/concerto/cron/concerto.schedule.tick.sh >> /var/log/cron.log 2>&1"; } | crontab - \
  && crontab -l | { cat; echo "* * * * * . /app/concerto/cron/concerto.forker.guard.sh >> /var/log/cron.log 2>&1"; } | crontab - \
  && crontab -l | { cat; echo "0 0 * * * . /app/concerto/cron/concerto.session.clear.sh >> /var/log/cron.log 2>&1"; } | crontab - \
